@@ -1,0 +1,124 @@
+ METHOD send_email.
+*   Constants Declaration
+    CONSTANTS:
+      lc_document_type   TYPE so_obj_tp VALUE 'HTM',
+      lc_attachment_type TYPE so_obj_tp VALUE 'BIN'.
+
+*   Data Declaration
+    DATA :
+      lt_cds_key      TYPE if_smtg_email_template=>ty_gt_data_key,
+      lo_send_request TYPE REF TO cl_bcs,
+      lo_document     TYPE REF TO cl_document_bcs,
+      lo_sender       TYPE REF TO cl_sapuser_bcs,
+      lo_recipient    TYPE REF TO cl_cam_address_bcs,
+      l_xstring_data  TYPE xstring,
+      ls_userdetails  TYPE bapiaddr3,
+      lt_return       TYPE bapiret2_t,
+      lt_solix        TYPE solix_tab,
+      lv_size         TYPE i.
+
+*   Get Email Template
+    TRY.
+        cl_smtg_email_api=>get_instance(
+          iv_template_id = 'Z2MAIL_OTC_SALESDOC_CHANGE'  )->render(
+          EXPORTING
+            iv_language         = sy-langu
+            it_data_key         = lt_cds_key
+          IMPORTING
+            ev_subject          = DATA(lv_subject)
+            ev_body_html        = DATA(lv_body_html)
+        ).
+      CATCH cx_smtg_email_common.
+    ENDTRY.
+
+*   Get user name
+    CALL FUNCTION 'BAPI_USER_GET_DETAIL'
+      EXPORTING
+        username = sy-uname
+      IMPORTING
+        address  = ls_userdetails
+      TABLES
+        return   = lt_return.
+
+*   Replace the placeholder with actual data
+    REPLACE '{date}'  IN lv_subject   WITH |{ sy-datum+6(2) }.{ sy-datum+4(2) }.{ sy-datum+0(4) }|.
+    REPLACE '{uname}' IN lv_body_html WITH ls_userdetails-fullname.
+
+*   Convert the body in SOLI Format
+    DATA(lv_body_html_soli) = cl_bcs_convert=>string_to_soli( iv_string = lv_body_html ).
+
+*   Populate the feildcatalog with long text
+    IF it_fieldcatlog IS NOT INITIAL.
+      DATA(lt_fieldcatlog) = CORRESPONDING lvc_t_fcat( it_fieldcatlog MAPPING coltext = scrtext_l ).
+    ENDIF.
+
+    DATA(lt_output) = it_output.
+
+    TRY.
+*   Convert internal table to XSTRING (XLSX format)
+        cl_salv_bs_lex=>export_from_result_data_table(
+          EXPORTING
+            is_format            = if_salv_bs_lex_format=>mc_format_xlsx
+            ir_result_data_table =
+                    cl_salv_ex_util=>factory_result_data_table(
+                                          r_data = REF #( lt_output )
+                                          t_fieldcatalog = lt_fieldcatlog )
+          IMPORTING
+            er_result_file = l_xstring_data ).
+      CATCH cx_salv_msg INTO DATA(lx_salv_msg).
+        MESSAGE lx_salv_msg->get_text( ) TYPE z2cl_tech_comm_utilities_cld=>gc_msg_type_error.
+    ENDTRY.
+
+*   Convert the xstring to binary table format
+    CALL FUNCTION 'SCMS_XSTRING_TO_BINARY'
+      EXPORTING
+        buffer        = l_xstring_data
+      IMPORTING
+        output_length = lv_size
+      TABLES
+        binary_tab    = lt_solix.
+
+*   Create email body and subject
+    TRY.
+        lo_document = cl_document_bcs=>create_document(
+            i_type    = lc_document_type
+            i_text    = lv_body_html_soli
+            i_subject = CONV #( lv_subject ) ).
+
+*       Add Attachment
+        lo_document->add_attachment(
+            i_attachment_type    = lc_attachment_type
+            i_attachment_subject = |{ lv_subject }{ TEXT-001 } |
+            i_attachment_size    = CONV #( lv_size )
+            i_att_content_hex    = lt_solix ).
+      CATCH cx_document_bcs INTO DATA(lv_document_msg).
+        MESSAGE lv_document_msg->get_text( ) TYPE z2cl_tech_comm_utilities_cld=>gc_msg_type_error.
+    ENDTRY.
+
+*    Set Sender and Recipients
+    TRY.
+        "Add document to send request
+        lo_send_request = cl_bcs=>create_persistent( ).
+        lo_send_request->set_document( lo_document ).
+        lo_sender = cl_sapuser_bcs=>create( sy-uname ).
+        lo_send_request->set_sender( lo_sender ).
+
+        lo_recipient = cl_cam_address_bcs=>create_internet_address( iv_email ).
+        lo_send_request->add_recipient( lo_recipient ).
+
+        "Send the Email
+        lo_send_request->set_send_immediately( abap_true ).
+        DATA(lv_result) = lo_send_request->send( i_with_error_screen = abap_true ).
+        IF lv_result EQ abap_true.
+          COMMIT WORK.
+          MESSAGE TEXT-s01 TYPE z2cl_tech_comm_utilities_cld=>gc_msg_type_success.
+        ELSE.
+          MESSAGE TEXT-e09 TYPE z2cl_tech_comm_utilities_cld=>gc_msg_type_error.
+        ENDIF.
+      CATCH cx_send_req_bcs INTO DATA(lv_send_req_msg).
+        MESSAGE lv_send_req_msg->get_text( ) TYPE z2cl_tech_comm_utilities_cld=>gc_msg_type_error.
+      CATCH cx_address_bcs INTO DATA(lx_address_msg).
+        MESSAGE lx_address_msg->get_text( ) TYPE z2cl_tech_comm_utilities_cld=>gc_msg_type_error.
+    ENDTRY.
+
+  ENDMETHOD.
