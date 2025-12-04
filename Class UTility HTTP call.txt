@@ -1,0 +1,191 @@
+class ZCL_MULESOFT_UTILITY definition
+  public
+  final
+  create public .
+
+public section.
+
+  methods POST_DATA
+    importing
+      !IV_DATA type STRING
+      !IV_PATH type STRING
+      !IV_RFC_DESTINATION type RFCDEST optional
+    changing
+      value(CV_STRING) type STRING optional
+    exceptions
+      RFC_DESTINATION_NOT_FOUND
+      RFC_DESTINATION_NO_AUTHORITY
+      HTTP_RESP_ERROR
+      INTERNAL_ERROR .
+protected section.
+private section.
+ENDCLASS.
+
+
+
+CLASS ZCL_MULESOFT_UTILITY IMPLEMENTATION.
+
+
+* <SIGNATURE>---------------------------------------------------------------------------------------+
+* | Instance Public Method ZCL_MULESOFT_UTILITY->POST_DATA
+* +-------------------------------------------------------------------------------------------------+
+* | [--->] IV_DATA                        TYPE        STRING
+* | [--->] IV_PATH                        TYPE        STRING
+* | [--->] IV_RFC_DESTINATION             TYPE        RFCDEST(optional)
+* | [<-->] CV_STRING                      TYPE        STRING(optional)
+* | [EXC!] RFC_DESTINATION_NOT_FOUND
+* | [EXC!] RFC_DESTINATION_NO_AUTHORITY
+* | [EXC!] HTTP_RESP_ERROR
+* | [EXC!] INTERNAL_ERROR
+* +--------------------------------------------------------------------------------------</SIGNATURE>
+  METHOD post_data.
+
+    DATA: lo_http_client TYPE REF TO if_http_client,
+          lo_rest_client TYPE REF TO cl_rest_http_client,
+          lo_response    TYPE REF TO if_rest_entity,
+          lo_request     TYPE REF TO if_rest_entity,
+          lv_status_code TYPE string,
+          lv_rfc_dest    TYPE rfcdest,
+          lv_uuid        TYPE sysuuid_x16,
+          lv_uuid_c32    TYPE sysuuid_c32,
+          lo_guid_error  TYPE REF TO cx_uuid_error.
+
+    IF iv_rfc_destination IS INITIAL.
+      lv_rfc_dest = 'RFC_MULESOFT'.
+    ELSE.
+      lv_rfc_dest = iv_rfc_destination.
+    ENDIF.
+
+    CALL METHOD cl_http_client=>create_by_destination
+      EXPORTING
+        destination              = lv_rfc_dest "'RFC_MULESOFT' " Pass RFC destination specific to your process area
+      IMPORTING
+        client                   = lo_http_client
+      EXCEPTIONS
+        argument_not_found       = 1
+        destination_not_found    = 2
+        destination_no_authority = 3
+        plugin_not_active        = 4
+        internal_error           = 5
+        OTHERS                   = 6.
+    IF sy-subrc <> 0.
+      CASE sy-subrc.
+        WHEN 2.
+          RAISE rfc_destination_not_found.
+        WHEN 3.
+          RAISE rfc_destination_no_authority.
+        WHEN OTHERS.
+          RAISE internal_error.
+      ENDCASE.
+    ENDIF.
+    cl_http_utility=>set_request_uri(
+         EXPORTING
+           request = lo_http_client->request
+           uri     = iv_path
+       ).
+
+    CREATE OBJECT lo_rest_client
+      EXPORTING
+        io_http_client = lo_http_client.
+
+
+    CALL METHOD lo_rest_client->if_rest_client~set_request_header
+      EXPORTING
+        iv_name  = 'Content-Type' ##NO_TEXT
+        iv_value = 'application/json'.
+
+    CALL METHOD lo_rest_client->if_rest_client~set_request_header
+      EXPORTING
+        iv_name  = 'Accept' ##NO_TEXT
+        iv_value = 'application/json'.
+
+    TRY.
+        CALL METHOD cl_system_uuid=>if_system_uuid_static~create_uuid_x16
+          RECEIVING
+            uuid = lv_uuid.
+
+      CATCH cx_uuid_error INTO lo_guid_error.
+        IF lo_guid_error IS BOUND.
+
+        ENDIF.
+    ENDTRY.
+    TRY.
+        CALL METHOD cl_system_uuid=>if_system_uuid_static~convert_uuid_x16
+          EXPORTING
+            uuid     = lv_uuid
+          IMPORTING
+*           uuid_c22 = ls_locid-locid
+            uuid_c32 = lv_uuid_c32
+*           uuid_c26 =
+          .
+      CATCH cx_uuid_error .
+    ENDTRY.
+
+    DATA lv_uuid_string TYPE string.
+    lv_uuid_string = lv_uuid_c32.
+
+    CALL METHOD lo_rest_client->if_rest_client~set_request_header
+      EXPORTING
+        iv_name  = 'correlationId' ##NO_TEXT
+        iv_value = lv_uuid_string. "CONV string( lv_uuid_c32 ).
+
+    lo_request = lo_rest_client->if_rest_client~create_request_entity( ).
+
+* set body data for POST request
+    lo_request->set_string_data( iv_data ).
+
+* post the request
+    lo_rest_client->if_rest_client~post( lo_request ).
+
+* HTTP response from rest client.
+    lo_response = lo_rest_client->if_rest_client~get_response_entity( ).
+
+* HTTP return status
+    lv_status_code   = lo_response->get_header_field( '~status_code' ).
+    IF ( lv_status_code+0(1) <> 2 ).  "change done by prjain
+      RAISE http_resp_error.
+    ENDIF.
+    cv_string   = lo_response->get_string_data( ).
+
+
+
+
+
+**HTTP Client Abstraction
+*    DATA   lv_url TYPE string.
+*    lv_url = 'http://api-dev.sequt.com:8091/api/v1/nl-maintenance-order-publisher-api/maintenance-order'.
+*
+*    CALL METHOD cl_http_client=>create_by_url
+*      EXPORTING
+*        url                = lv_url
+*      IMPORTING
+*        client             = lo_http_client
+*      EXCEPTIONS
+*        argument_not_found = 1
+*        plugin_not_active  = 2
+*        internal_error     = 3
+*        pse_not_found      = 4
+*        pse_not_distrib    = 5
+*        pse_errors         = 6
+*        OTHERS             = 7.
+*    IF sy-subrc <> 0.
+** Implement suitable error handling here
+*    ENDIF.
+
+**-- temporary
+*    DATA: lv_cred  TYPE string,
+*          lv_token TYPE string.
+*    CALL METHOD cl_http_utility=>if_http_utility~encode_base64
+*      EXPORTING
+*        unencoded = '6fff35c000ec4c98bb89cdc2ef32fa44:4bf1a9A84659484a827134677df46D84'
+*      RECEIVING
+*        encoded   = lv_cred.
+*    CONCATENATE 'Basic'  lv_cred INTO lv_token SEPARATED BY space.
+*
+*    CALL METHOD lo_rest_client->if_rest_client~set_request_header
+*      EXPORTING
+*        iv_name  = 'Authorization' ##NO_TEXT
+*        iv_value = lv_token.
+***-- temporary
+  ENDMETHOD.
+ENDCLASS.
